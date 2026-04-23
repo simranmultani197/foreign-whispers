@@ -196,12 +196,21 @@ def files_from_dir(dir_path) -> list:
     return es_files
 
 
-def _synthesize_raw(tts_engine, text: str, wav_path: str) -> bytes | None:
-    """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure."""
+def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | None = None) -> bytes | None:
+    """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure.
+
+    When *speaker_wav* is provided and the engine is a ``ChatterboxClient`` (the
+    only backend that supports voice cloning today), the reference WAV is
+    forwarded as a kwarg so Chatterbox uses it for voice matching. Other
+    engines (local Coqui) silently ignore the hint.
+    """
     if not text or not text.strip():
         return None
     try:
-        tts_engine.tts_to_file(text=text, file_path=wav_path)
+        if speaker_wav and isinstance(tts_engine, ChatterboxClient):
+            tts_engine.tts_to_file(text=text, file_path=wav_path, speaker_wav=speaker_wav)
+        else:
+            tts_engine.tts_to_file(text=text, file_path=wav_path)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
         print(f"[tts] TTS failed for segment ({exc}), using silence")
@@ -395,7 +404,92 @@ def _compute_speech_offset(source_path: str) -> float:
     return yt_start - whisper_start
 
 
-def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=None):
+def _resolve_per_speaker_voices(
+    segments: list[dict],
+    speaker_voice_map: dict[str, str] | None,
+    fallback_speaker_wav: str | None,
+) -> dict[str, str]:
+    """Build (or normalise) the ``speaker_label -> voice_wav`` map.
+
+    Strategy:
+
+    1. If the caller provided an explicit *speaker_voice_map*, trust it.
+    2. Otherwise, collect the distinct ``speaker`` labels present in *segments*.
+       If there are none (diarization wasn't run), return an empty dict — the
+       engine will fall back to *fallback_speaker_wav* for every segment.
+    3. For each distinct speaker label, try ``resolve_speaker_wav`` with the
+       label as ``speaker_id`` so a specific ``speakers/es/SPEAKER_00.wav`` is
+       used when available, otherwise fall back to the language default.
+    4. If multiple speakers all resolve to the same default WAV but several
+       reference voices exist under ``speakers/es/``, round-robin assign the
+       alternatives so each speaker gets a distinct voice.
+    """
+    if speaker_voice_map is not None:
+        return dict(speaker_voice_map)
+
+    distinct = []
+    for seg in segments:
+        label = seg.get("speaker")
+        if label and label not in distinct:
+            distinct.append(label)
+
+    if not distinct:
+        return {}
+
+    try:
+        from foreign_whispers.voice_resolution import resolve_speaker_wav
+    except ImportError:
+        return {}
+
+    speakers_base = pathlib.Path(__file__).parent.parent.parent.parent / "pipeline_data" / "speakers"
+    lang = "es"
+
+    mapping: dict[str, str] = {}
+    for label in distinct:
+        try:
+            mapping[label] = resolve_speaker_wav(speakers_base, lang, label)
+        except Exception:
+            mapping[label] = fallback_speaker_wav or "default.wav"
+
+    # Round-robin distinct non-default voices if multiple speakers collapsed to
+    # the same default — gives auditory separation even without per-speaker WAVs.
+    lang_dir = speakers_base / lang
+    if lang_dir.is_dir():
+        alt_voices = sorted(
+            f"{lang}/{p.name}" for p in lang_dir.glob("*.wav")
+            if p.name != "default.wav"
+        )
+        default_rel = f"{lang}/default.wav"
+        collapsed = [s for s, v in mapping.items() if v == default_rel]
+        if len(collapsed) > 1 and alt_voices:
+            for i, label in enumerate(collapsed[1:]):  # keep first on default
+                mapping[label] = alt_voices[i % len(alt_voices)]
+
+    return mapping
+
+
+def _voice_for_segment(
+    segment: dict,
+    speaker_voice_map: dict[str, str],
+    fallback_speaker_wav: str | None,
+) -> str | None:
+    """Pick the reference WAV for one segment based on its speaker label."""
+    if speaker_voice_map:
+        label = segment.get("speaker")
+        if label and label in speaker_voice_map:
+            return speaker_voice_map[label]
+    return fallback_speaker_wav
+
+
+def text_file_to_speech(
+    source_path,
+    output_path,
+    tts_engine=None,
+    *,
+    alignment=None,
+    speaker_wav=None,
+    speaker_voice_map=None,
+):
     """Read translated JSON with segment timestamps and produce a time-aligned WAV.
 
     Each segment is individually synthesized and time-stretched to match its
@@ -408,6 +502,16 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
 
     *alignment* overrides the module-level ``_ALIGNMENT_ENABLED`` flag.
     Pass True for aligned mode, False for baseline, or None to use the env var.
+
+    *speaker_wav* selects the default reference voice for Chatterbox voice
+    cloning (path relative to ``pipeline_data/speakers/``). Ignored by non-
+    Chatterbox engines.
+
+    *speaker_voice_map* overrides *speaker_wav* per segment when diarization
+    has labeled each segment with a ``speaker`` field. Keys are speaker labels
+    (e.g. ``"SPEAKER_00"``); values are reference WAV paths. When *None* and
+    segments carry ``speaker`` fields, a map is built automatically by
+    round-robin assignment of available voices under ``speakers/es/``.
     """
     engine = tts_engine if tts_engine is not None else _get_tts_engine()
     use_alignment = alignment if alignment is not None else _ALIGNMENT_ENABLED
@@ -416,6 +520,9 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
     print(f"generating {save_name}...", end="")
 
     segments = segments_from_file(source_path)
+    speaker_voice_map = _resolve_per_speaker_voices(
+        segments, speaker_voice_map, speaker_wav,
+    )
 
     if not segments:
         text = text_from_file(source_path)
@@ -474,14 +581,22 @@ def text_file_to_speech(source_path, output_path, tts_engine=None, *, alignment=
 
     raw_wav_map: dict[int, bytes | None] = {}
 
+    # Resolve per-segment speaker voice (falls back to the clip-level speaker_wav).
+    seg_voices = {
+        m["index"]: _voice_for_segment(
+            segments[m["index"]], speaker_voice_map, speaker_wav,
+        )
+        for m in seg_metas
+    }
+
     with tempfile.TemporaryDirectory() as synth_dir:
-        def _do_synth(idx: int, text: str) -> tuple[int, bytes | None]:
+        def _do_synth(idx: int, text: str, voice: str | None) -> tuple[int, bytes | None]:
             wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
-            return idx, _synthesize_raw(engine, text, wav_path)
+            return idx, _synthesize_raw(engine, text, wav_path, speaker_wav=voice)
 
         with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
             futures = {
-                pool.submit(_do_synth, m["index"], m["text"]): m["index"]
+                pool.submit(_do_synth, m["index"], m["text"], seg_voices[m["index"]]): m["index"]
                 for m in seg_metas
             }
             for fut in as_completed(futures):
