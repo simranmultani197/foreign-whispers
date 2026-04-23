@@ -43,25 +43,60 @@ async def diarize_endpoint(video_id: str):
             skipped=True,
         )
 
-    # ---- YOUR CODE HERE ----
-    # Step 1: Extract audio from video
-    #   video_path = settings.videos_dir / f"{title}.mp4"
-    #   audio_path = diar_dir / f"{title}.wav"
-    #   Use subprocess.run to call:
-    #     ffmpeg -i <video_path> -vn -acodec pcm_s16le -ar 16000 -y <audio_path>
-    #
-    # Step 2: Run diarization
-    #   diar_segments = _alignment_service.diarize(str(audio_path))
-    #
-    # Step 3: Extract unique speakers
-    #   speakers = sorted(set(s["speaker"] for s in diar_segments))
-    #
-    # Step 4: Cache result
-    #   result = {"speakers": speakers, "segments": diar_segments}
-    #   diar_path.write_text(json.dumps(result))
-    #
-    # Step 5: Return DiarizeResponse
-    #   return DiarizeResponse(video_id=video_id, speakers=speakers, segments=diar_segments)
-    #
-    raise HTTPException(status_code=501, detail="Diarization not yet implemented")
-    # ---- END YOUR CODE ----
+    video_path = settings.videos_dir / f"{title}.mp4"
+    if not video_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Source video not found at {video_path}; run /api/download first.",
+        )
+
+    audio_path = diar_dir / f"{title}.wav"
+
+    def _extract_and_diarize() -> tuple[list[str], list[dict]]:
+        if not audio_path.exists():
+            proc = subprocess.run(
+                [
+                    "ffmpeg", "-i", str(video_path),
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000",
+                    "-y", str(audio_path),
+                ],
+                capture_output=True, text=True,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"ffmpeg audio extraction failed ({proc.returncode}): "
+                    f"{proc.stderr.strip()[:500]}"
+                )
+
+        diar_segments = _alignment_service.diarize(str(audio_path))
+        unique_speakers = sorted({s["speaker"] for s in diar_segments})
+        return unique_speakers, diar_segments
+
+    try:
+        speakers, diar_segments = await asyncio.to_thread(_extract_and_diarize)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    diar_path.write_text(json.dumps({
+        "speakers": speakers,
+        "segments": diar_segments,
+    }))
+
+    # Merge speaker labels into the cached transcription (if it exists) so
+    # downstream stages (translate, TTS) can route by speaker.
+    transcript_path = settings.transcriptions_dir / f"{title}.json"
+    if transcript_path.exists():
+        from foreign_whispers.diarization import assign_speakers
+
+        transcript = json.loads(transcript_path.read_text())
+        transcript["segments"] = assign_speakers(
+            transcript.get("segments", []),
+            diar_segments,
+        )
+        transcript_path.write_text(json.dumps(transcript))
+
+    return DiarizeResponse(
+        video_id=video_id,
+        speakers=speakers,
+        segments=diar_segments,
+    )
