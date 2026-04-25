@@ -21,12 +21,11 @@ CHATTERBOX_SPEAKER_WAV = os.getenv("CHATTERBOX_SPEAKER_WAV", "")
 # Default is "on" (new clamped path). Useful for A/B comparisons.
 _ALIGNMENT_ENABLED = os.getenv("FW_ALIGNMENT", "on").lower() != "off"
 
-SPEED_MIN = 0.75
-SPEED_MAX = 1.25
-# When TTS audio is less than this fraction of the target window, skip
-# time-stretching entirely — play at natural speed and pad with silence.
-# Prevents comically slow speech in windows with long narrator pauses.
-_STRETCH_SKIP_RATIO = 0.5
+# Widened from 0.75/1.25 → 0.5/2.0 so the post-processor can honor the full
+# range of stretch factors the alignment DP plans (mild_stretch reaches ~1.4×
+# in practice, and request_shorter fallbacks need >1.5× until reranking lands).
+SPEED_MIN = 0.5
+SPEED_MAX = 2.0
 _SPEED_MIN_LEGACY = 0.1
 _SPEED_MAX_LEGACY = 10.0
 
@@ -247,11 +246,12 @@ def _postprocess_segment(raw_wav_bytes: bytes | None, target_sec: float,
     if not alignment_enabled:
         speed_factor = duration_ratio
         speed_factor = max(_SPEED_MIN_LEGACY, min(_SPEED_MAX_LEGACY, speed_factor))
-    elif duration_ratio < _STRETCH_SKIP_RATIO:
-        # TTS is dramatically shorter than target — narrator was pausing.
-        # Play at natural speed; silence padding below handles the gap.
-        speed_factor = 1.0
     else:
+        # Always honor the alignment DP's stretch_factor — even when the raw
+        # TTS clip is much shorter than the target window. Previously a
+        # `duration_ratio < 0.5` early-exit forced speed_factor=1.0, which
+        # bypassed alignment entirely and left ~80% silent gaps in the
+        # output. Trust the planner; SPEED_MIN/MAX still clamp the extreme.
         effective_target = target_sec * max(stretch_factor, 0.1)
         speed_factor = raw_duration / effective_target
         speed_factor = max(SPEED_MIN, min(SPEED_MAX, speed_factor))
