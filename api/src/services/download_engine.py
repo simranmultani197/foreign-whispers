@@ -12,9 +12,21 @@ from youtube_transcript_api import YouTubeTranscriptApi
 _COOKIES_FILE = os.getenv("YT_COOKIES_FILE", "/app/cookies.txt")
 
 def _yt_dlp_opts(**extra):
-    """Base yt-dlp options. Cookies are optional — yt-dlp works without them
-    by using alternative YouTube clients (Android VR) that bypass n-challenge."""
-    opts = {"quiet": True, "no_warnings": True}
+    """Base yt-dlp options.
+
+    YouTube now wraps stream URLs behind a JavaScript "n-challenge" that
+    yt-dlp must execute to deobfuscate format URLs. Solving it requires
+    a JS runtime (deno) plus the EJS solver script. We opt in to the
+    GitHub-hosted solver via ``remote_components`` so format extraction
+    works on a fresh container without manual fetches.
+    """
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        # Equivalent to CLI flag --remote-components ejs:github. yt-dlp
+        # downloads the solver script the first time it's needed.
+        "remote_components": ["ejs:github"],
+    }
     if pathlib.Path(_COOKIES_FILE).exists():
         opts["cookiefile"] = _COOKIES_FILE
     opts.update(extra)
