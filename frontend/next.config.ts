@@ -3,7 +3,10 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "standalone",
   experimental: {
-    proxyTimeout: 600_000, // 10 minutes — TTS can take several minutes on CPU
+    // Long-form videos with diarization on can produce 1k+ TTS segments;
+    // observed ~14 min for a 13 min source with 360 segments on a 4070 Ti.
+    // Set to 1 hour to give headroom for ~60 min source clips.
+    proxyTimeout: 3_600_000, // 60 minutes
   },
   async rewrites() {
     return [
