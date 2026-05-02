@@ -48,7 +48,10 @@ try:
         _orig_torch_load = _torch.load
 
         def _patched_torch_load(*args, **kwargs):
-            kwargs.setdefault("weights_only", False)
+            # Force, don't setdefault — pytorch-lightning's load_from_checkpoint
+            # passes weights_only=True explicitly on newer versions, which would
+            # bypass setdefault and re-trigger the WeightsUnpickler error.
+            kwargs["weights_only"] = False
             return _orig_torch_load(*args, **kwargs)
 
         _patched_torch_load._fw_patched = True
