@@ -13,19 +13,25 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# torchaudio 2.7+ removed AudioMetaData; pyannote.audio 3.4.0 references
-# it as a type annotation in pyannote/audio/core/io.py, so `import
-# pyannote.audio` raises AttributeError before any code runs. Restore a
-# stub class so the annotation resolves — the actual metadata is read via
-# attribute access on torchaudio.info()'s return value, which is still
-# compatible. Run at module load so the shim is in place before anything
-# (tests, services, notebooks) imports pyannote.
+# torchaudio 2.7+ removed several module-level APIs that pyannote.audio 3.4.0
+# still references at import time. Restore stubs so the imports resolve — the
+# real work is done via APIs that still exist (torchaudio.info, soundfile).
+# Run at module load so the shim is in place before anything (tests, services,
+# notebooks) imports pyannote.
 try:
     import torchaudio as _torchaudio
+
+    # AudioMetaData: used as a return-type annotation in pyannote/audio/core/io.py.
     if not hasattr(_torchaudio, "AudioMetaData"):
         class _AudioMetaDataShim:
             """Stub for pyannote.audio compatibility on torchaudio>=2.7."""
         _torchaudio.AudioMetaData = _AudioMetaDataShim
+
+    # list_audio_backends: removed in 2.7 along with the legacy backend system.
+    # pyannote.audio.core.io.Audio.__init__ calls it for validation only;
+    # returning a non-empty list is enough to satisfy the check.
+    if not hasattr(_torchaudio, "list_audio_backends"):
+        _torchaudio.list_audio_backends = lambda: ["soundfile"]
 except ImportError:
     pass
 
