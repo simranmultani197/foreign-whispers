@@ -38,6 +38,9 @@ alignment = [
     "logfire",
     "silero-vad",
     "pyannote.audio",
+    # torchaudio 2.7 routes load() through torchcodec; pyannote.audio.Audio.crop
+    # calls torchaudio.load() so torchcodec must be present.
+    "torchcodec",
 ]
 
 [tool.uv]
