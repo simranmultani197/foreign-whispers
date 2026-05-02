@@ -41,30 +41,36 @@ alignment = [
 ]
 
 [tool.uv]
-# Pin torch<2.7 so torchaudio still ships AudioMetaData + list_audio_backends and
-# does not require torchcodec for audio loading (pyannote.audio 3.4 uses both).
-# torch 2.6 still flipped weights_only=True default; foreign_whispers/diarization.py
-# patches that for pyannote model loads.
+# Pin torch to the cu124 / 2.5 line. Why this line:
+#   * torchaudio 2.5 still ships AudioMetaData + list_audio_backends, so
+#     pyannote.audio 3.4 imports cleanly without our compatibility shims.
+#   * torch 2.5 predates the weights_only=True default flip in 2.6, so
+#     pyannote model loads work out of the box.
+#   * No torchcodec dependency at this version.
+#   * cu124 wheels declare their nvidia-cuda-runtime-cu12 / nvidia-cublas-cu12
+#     deps, so uv resolves the full CUDA runtime alongside torch (the cu126
+#     wheels did not, leading to libcublas.so / libcudart.so import failures).
+#   * Works on Ada (sm_89, 4070 Ti SUPER) and earlier architectures.
 constraint-dependencies = [
     "onnxruntime<1.24",
     "numpy<2",
     "transformers<4.46",
-    "torch>=2.6,<2.7",
-    "torchaudio>=2.6,<2.7",
+    "torch>=2.5,<2.6",
+    "torchaudio>=2.5,<2.6",
 ]
 find-links = [
-    "https://download.pytorch.org/whl/cu126",
+    "https://download.pytorch.org/whl/cu124",
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu126" }
-torchaudio = { index = "pytorch-cu126" }
-torchvision = { index = "pytorch-cu126" }
+torch = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
