@@ -35,6 +35,27 @@ try:
 except ImportError:
     pass
 
+# PyTorch 2.6 flipped torch.load's default to weights_only=True. pyannote.audio's
+# checkpoints contain classes (TorchVersion, omegaconf, lightning) that aren't on
+# the default safe-globals allowlist, so pyannote's model load fails with
+# `WeightsUnpickler error: Unsupported global`. The pyannote weights come from
+# the gated pyannote/* HF repos signed by the pyannote team, so weights_only=False
+# is an acceptable tradeoff here. Patch torch.load to default to False unless the
+# caller explicitly opts in.
+try:
+    import torch as _torch
+    if not getattr(_torch.load, "_fw_patched", False):
+        _orig_torch_load = _torch.load
+
+        def _patched_torch_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return _orig_torch_load(*args, **kwargs)
+
+        _patched_torch_load._fw_patched = True
+        _torch.load = _patched_torch_load
+except ImportError:
+    pass
+
 
 def diarize_audio(audio_path: str, hf_token: str | None = None) -> list[dict]:
     """Return speaker-labeled intervals for *audio_path*.
