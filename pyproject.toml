@@ -38,30 +38,33 @@ alignment = [
     "logfire",
     "silero-vad",
     "pyannote.audio",
-    # torchaudio 2.7 routes load() through torchcodec; pyannote.audio.Audio.crop
-    # calls torchaudio.load() so torchcodec must be present.
-    "torchcodec",
 ]
 
 [tool.uv]
+# Pin torch<2.7 so torchaudio still ships AudioMetaData + list_audio_backends and
+# does not require torchcodec for audio loading (pyannote.audio 3.4 uses both).
+# torch 2.6 still flipped weights_only=True default; foreign_whispers/diarization.py
+# patches that for pyannote model loads.
 constraint-dependencies = [
     "onnxruntime<1.24",
     "numpy<2",
     "transformers<4.46",
+    "torch>=2.6,<2.7",
+    "torchaudio>=2.6,<2.7",
 ]
 find-links = [
-    "https://download.pytorch.org/whl/cu128",
+    "https://download.pytorch.org/whl/cu126",
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = { index = "pytorch-cu126" }
+torchaudio = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
