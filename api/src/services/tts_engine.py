@@ -218,6 +218,58 @@ def files_from_dir(dir_path) -> list:
     return es_files
 
 
+def _split_text_aggressive(text: str, max_len: int = 80) -> list[str]:
+    """Split *text* on sentence then clause boundaries, targeting <= *max_len* chars.
+
+    Used by the chunked-retry fallback in ``_synthesize_raw`` when Chatterbox
+    rejects a specific token sequence — re-synthesising shorter pieces usually
+    sidesteps the autoregressive decoder's recursion error.
+    """
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    out: list[str] = []
+    for s in sentences:
+        if not s.strip():
+            continue
+        if len(s) <= max_len:
+            out.append(s.strip())
+            continue
+        clauses = re.split(r'(?<=[,;:])\s+', s)
+        cur = ""
+        for c in clauses:
+            if cur and len(cur) + len(c) + 1 > max_len:
+                out.append(cur.strip())
+                cur = c
+            else:
+                cur = f"{cur} {c}".strip() if cur else c
+        if cur:
+            out.append(cur.strip())
+    return out
+
+
+def _synthesize_chunked_with_voice(
+    client: "ChatterboxClient", text: str, wav_path: str, speaker_wav: str,
+) -> None:
+    """Synthesise *text* in small chunks, each with *speaker_wav*, then concat.
+
+    Bypasses ``ChatterboxClient.tts_to_file`` so we control the chunk size
+    (sentence/clause-level) and can preserve the cloned voice across all parts.
+    """
+    chunks = _split_text_aggressive(text)
+    if len(chunks) <= 1:
+        # Nothing to gain from "chunking" the same text; let the caller decide.
+        raise ValueError("text not splittable for chunked retry")
+
+    combined = AudioSegment.empty()
+    for chunk in chunks:
+        wav_bytes = client._synthesize_with_voice(chunk, speaker_wav)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
+            tmp.write(wav_bytes)
+            tmp.flush()
+            combined += AudioSegment.from_wav(tmp.name)
+    combined.export(wav_path, format="wav")
+
+
 def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | None = None) -> bytes | None:
     """GPU-bound: call TTS engine and return raw WAV bytes, or None on failure.
 
@@ -225,30 +277,53 @@ def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | Non
     only backend that supports voice cloning today), the reference WAV is
     forwarded as a kwarg so Chatterbox uses it for voice matching. Other
     engines (local Coqui) silently ignore the hint.
+
+    On Chatterbox failure (occasional 500 from the autoregressive decoder on
+    specific token sequences) the fallback ladder is:
+        1. retry once with the same speaker_wav (often transient);
+        2. split text into clause-level chunks, synthesise each with the
+           speaker_wav, concat — preserves cloned voice;
+        3. last resort: retry without speaker_wav (audibly different voice
+           but better than silence);
+        4. give up → return None (caller fills with silence).
     """
     if not text or not text.strip():
         return None
+
+    use_clone = bool(speaker_wav) and isinstance(tts_engine, ChatterboxClient)
+
     try:
-        if speaker_wav and isinstance(tts_engine, ChatterboxClient):
+        if use_clone:
             tts_engine.tts_to_file(text=text, file_path=wav_path, speaker_wav=speaker_wav)
         else:
             tts_engine.tts_to_file(text=text, file_path=wav_path)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
-        # Chatterbox occasionally raises a 500 on specific text+voice combos
-        # (the model's autoregressive decoder hits a recursion error for some
-        # tokenizations). Retry once without the reference voice — the segment
-        # loses its speaker-specific timbre but at least produces audible
-        # speech instead of silence.
-        if speaker_wav and isinstance(tts_engine, ChatterboxClient):
-            try:
-                print(f"[tts] retry without speaker_wav after error: {exc}")
-                tts_engine.tts_to_file(text=text, file_path=wav_path)
-                return pathlib.Path(wav_path).read_bytes()
-            except Exception as exc2:
-                print(f"[tts] TTS failed for segment ({exc2}), using silence")
-                return None
-        print(f"[tts] TTS failed for segment ({exc}), using silence")
+        if not use_clone:
+            print(f"[tts] TTS failed for segment ({exc}), using silence")
+            return None
+        first_exc = exc
+
+    try:
+        print(f"[tts] retry with same speaker_wav after error: {first_exc}")
+        tts_engine.tts_to_file(text=text, file_path=wav_path, speaker_wav=speaker_wav)
+        return pathlib.Path(wav_path).read_bytes()
+    except Exception as exc2:
+        second_exc = exc2
+
+    try:
+        print(f"[tts] chunked retry with speaker_wav after error: {second_exc}")
+        _synthesize_chunked_with_voice(tts_engine, text, wav_path, speaker_wav)
+        return pathlib.Path(wav_path).read_bytes()
+    except Exception as exc3:
+        third_exc = exc3
+
+    try:
+        print(f"[tts] last-resort retry without speaker_wav after error: {third_exc}")
+        tts_engine.tts_to_file(text=text, file_path=wav_path)
+        return pathlib.Path(wav_path).read_bytes()
+    except Exception as exc4:
+        print(f"[tts] TTS failed for segment ({exc4}), using silence")
         return None
 
 
