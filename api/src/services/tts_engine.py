@@ -78,11 +78,27 @@ class ChatterboxClient:
     _READ_TIMEOUT = int(os.getenv("FW_TTS_READ_TIMEOUT", "300"))
     _CONNECT_TIMEOUT = 5
 
+    # Generation parameters. Chatterbox defaults are temperature=0.8, cfg=0.5,
+    # exaggeration=0.5 — high enough that consecutive calls on the same
+    # reference WAV produce audibly different timbre. Lower temperature gives
+    # more consistent voice across segments at the cost of expressiveness.
+    # Tune via FW_TTS_TEMPERATURE / FW_TTS_CFG / FW_TTS_EXAGG.
+    _TEMPERATURE = float(os.getenv("FW_TTS_TEMPERATURE", "0.4"))
+    _CFG_WEIGHT = float(os.getenv("FW_TTS_CFG", "0.5"))
+    _EXAGGERATION = float(os.getenv("FW_TTS_EXAGG", "0.4"))
+
+    def _gen_params(self) -> dict:
+        return {
+            "temperature": self._TEMPERATURE,
+            "cfg_weight": self._CFG_WEIGHT,
+            "exaggeration": self._EXAGGERATION,
+        }
+
     def _synthesize_default(self, text: str) -> bytes:
         """Call /v1/audio/speech with the server's default voice."""
         resp = requests.post(
             f"{self.base_url}/v1/audio/speech",
-            json={"input": text, "response_format": "wav"},
+            json={"input": text, "response_format": "wav", **self._gen_params()},
             timeout=(self._CONNECT_TIMEOUT, self._READ_TIMEOUT),
         )
         resp.raise_for_status()
@@ -103,9 +119,11 @@ class ChatterboxClient:
             return self._synthesize_default(text)
 
         with open(wav_path, "rb") as f:
+            data = {"input": text, "response_format": "wav"}
+            data.update({k: str(v) for k, v in self._gen_params().items()})
             resp = requests.post(
                 f"{self.base_url}/v1/audio/speech/upload",
-                data={"input": text, "response_format": "wav"},
+                data=data,
                 files={"voice_file": (wav_path.name, f, "audio/wav")},
                 timeout=(self._CONNECT_TIMEOUT, self._READ_TIMEOUT),
             )
