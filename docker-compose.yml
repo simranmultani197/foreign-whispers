@@ -71,6 +71,12 @@ services:
       - FW_WHISPER_MODEL=base
       - FW_HF_TOKEN=${FW_HF_TOKEN:-}
       - FW_LOGFIRE_WRITE_TOKEN=${FW_LOGFIRE_WRITE_TOKEN:-}
+      # Chatterbox sampling — biased toward cross-call voice stability over
+      # prosody variance. Higher CFG/lower temp keeps timbre consistent across
+      # consecutive segments synthesised with the same reference WAV.
+      - FW_TTS_TEMPERATURE=0.1
+      - FW_TTS_CFG=0.7
+      - FW_TTS_EXAGG=0.3
     env_file:
       - path: .env
         required: false
