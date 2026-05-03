@@ -212,6 +212,19 @@ def _synthesize_raw(tts_engine, text: str, wav_path: str, speaker_wav: str | Non
             tts_engine.tts_to_file(text=text, file_path=wav_path)
         return pathlib.Path(wav_path).read_bytes()
     except Exception as exc:
+        # Chatterbox occasionally raises a 500 on specific text+voice combos
+        # (the model's autoregressive decoder hits a recursion error for some
+        # tokenizations). Retry once without the reference voice — the segment
+        # loses its speaker-specific timbre but at least produces audible
+        # speech instead of silence.
+        if speaker_wav and isinstance(tts_engine, ChatterboxClient):
+            try:
+                print(f"[tts] retry without speaker_wav after error: {exc}")
+                tts_engine.tts_to_file(text=text, file_path=wav_path)
+                return pathlib.Path(wav_path).read_bytes()
+            except Exception as exc2:
+                print(f"[tts] TTS failed for segment ({exc2}), using silence")
+                return None
         print(f"[tts] TTS failed for segment ({exc}), using silence")
         return None
 
