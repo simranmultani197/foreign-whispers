@@ -49,9 +49,11 @@ services:
               count: all
               capabilities: [gpu]
 
-  # ── API (CPU orchestrator) — all profiles ─────────────────────────
-  # The API container is CPU-only. It delegates GPU work to the STT
-  # and TTS containers above via HTTP.
+  # ── API (orchestrator) — all profiles ─────────────────────────────
+  # Mostly delegates GPU work to STT/TTS containers via HTTP, but does run
+  # pyannote speaker diarization in-process — that needs GPU access too,
+  # otherwise diarize is glacial on CPU and produces empty output on
+  # long-form videos.
   api:
     container_name: foreign-whispers-api
     profiles: [nvidia, cpu]
@@ -77,6 +79,13 @@ services:
       - ./foreign_whispers:/app/foreign_whispers
       - ./api:/app/api
       - ./cookies.txt:/app/cookies.txt
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
 
   # ── Frontend (Next.js) — all profiles ──────────────────────────────
   frontend:
