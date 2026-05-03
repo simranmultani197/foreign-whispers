@@ -73,12 +73,17 @@ class ChatterboxClient:
                     combined += AudioSegment.from_wav(tmp.name)
             combined.export(file_path, format="wav")
 
+    # Per-call timeout for Chatterbox: (connect, read). Spanish segments can
+    # take >60 s on a single GPU; tune via FW_TTS_READ_TIMEOUT (seconds).
+    _READ_TIMEOUT = int(os.getenv("FW_TTS_READ_TIMEOUT", "300"))
+    _CONNECT_TIMEOUT = 5
+
     def _synthesize_default(self, text: str) -> bytes:
         """Call /v1/audio/speech with the server's default voice."""
         resp = requests.post(
             f"{self.base_url}/v1/audio/speech",
             json={"input": text, "response_format": "wav"},
-            timeout=(5, 60),
+            timeout=(self._CONNECT_TIMEOUT, self._READ_TIMEOUT),
         )
         resp.raise_for_status()
         return resp.content
@@ -102,7 +107,7 @@ class ChatterboxClient:
                 f"{self.base_url}/v1/audio/speech/upload",
                 data={"input": text, "response_format": "wav"},
                 files={"voice_file": (wav_path.name, f, "audio/wav")},
-                timeout=(5, 60),
+                timeout=(self._CONNECT_TIMEOUT, self._READ_TIMEOUT),
             )
         resp.raise_for_status()
         return resp.content
