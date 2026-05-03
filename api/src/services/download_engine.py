@@ -29,6 +29,15 @@ def _yt_dlp_opts(**extra):
     }
     if pathlib.Path(_COOKIES_FILE).exists():
         opts["cookiefile"] = _COOKIES_FILE
+
+    # Geo-bypass: spoof X-Forwarded-For so YouTube treats the request as
+    # coming from FW_GEO_BYPASS_COUNTRY (default US). Lets us download videos
+    # restricted to specific regions when the VM IP isn't in the allowlist.
+    geo_country = os.getenv("FW_GEO_BYPASS_COUNTRY", "US")
+    if geo_country:
+        opts["geo_bypass"] = True
+        opts["geo_bypass_country"] = geo_country
+
     opts.update(extra)
     return opts
 
