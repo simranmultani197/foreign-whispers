@@ -77,11 +77,6 @@ services:
       - FW_TTS_TEMPERATURE=0.1
       - FW_TTS_CFG=0.7
       - FW_TTS_EXAGG=0.3
-      # Batch consecutive segments into a single Chatterbox call before
-      # splitting on silence. Chatterbox keeps voice stable WITHIN one call
-      # but drifts across separate calls — batching eliminates inter-segment
-      # voice swaps. Set to 0 to fall back to per-segment synthesis.
-      - FW_TTS_BATCH=1
     env_file:
       - path: .env
         required: false

@@ -1,5 +1,4 @@
 import asyncio
-import io
 import logging as _logging
 import os
 import pathlib
@@ -217,126 +216,6 @@ def files_from_dir(dir_path) -> list:
         raise ValueError(f"no {SUFFIX} files found in {pth}")
 
     return es_files
-
-
-# ── Batched synthesis for cross-call voice stability ────────────────
-# Chatterbox's autoregressive decoder produces consistent timbre WITHIN a
-# single call but drifts across separate calls — even with the same reference
-# WAV and low temperature. The batch path concatenates several consecutive
-# segments into one synthesis call and splits the resulting audio on silence,
-# so all segments inside a batch share the same locked-in voice.
-_BATCH_ENABLED = os.getenv("FW_TTS_BATCH", "").lower() in ("1", "true", "on", "yes")
-# Max combined character length per batch. Kept under ChatterboxClient's
-# internal 200-char split threshold so the whole batch goes through one
-# `_synthesize_with_voice` call (no internal re-chunking).
-_BATCH_MAX_CHARS = int(os.getenv("FW_TTS_BATCH_MAX_CHARS", "180"))
-
-
-def _group_segments_for_batch(
-    seg_metas: list[dict],
-    seg_voices: dict[int, str | None],
-    max_chars: int = _BATCH_MAX_CHARS,
-) -> list[tuple[str | None, list[dict]]]:
-    """Group consecutive segments sharing the same voice into char-budgeted batches.
-
-    Returns a list of ``(voice, [seg_meta, ...])`` groups in original order.
-    A new batch starts when the voice changes or the combined text would
-    exceed *max_chars*.
-    """
-    groups: list[tuple[str | None, list[dict]]] = []
-    current: list[dict] = []
-    current_len = 0
-    current_voice: str | None = None
-    for m in seg_metas:
-        v = seg_voices.get(m["index"])
-        text_len = len(m["text"]) + 2  # ". " separator
-        if current and (v != current_voice or current_len + text_len > max_chars):
-            groups.append((current_voice, current))
-            current = []
-            current_len = 0
-        current.append(m)
-        current_len += text_len
-        current_voice = v
-    if current:
-        groups.append((current_voice, current))
-    return groups
-
-
-def _split_audio_into_n(audio: AudioSegment, n: int) -> list[AudioSegment]:
-    """Split *audio* into *n* chunks, preferring silence boundaries.
-
-    Falls back to even time-distribution if silence detection doesn't find
-    exactly *n* chunks (the alignment stage will absorb minor mis-splits via
-    its per-segment time-stretch).
-    """
-    if n <= 1:
-        return [audio]
-    try:
-        from pydub.silence import split_on_silence
-        chunks = split_on_silence(
-            audio,
-            min_silence_len=150,
-            silence_thresh=audio.dBFS - 16,
-            keep_silence=80,
-        )
-        if len(chunks) == n:
-            return chunks
-    except Exception as exc:
-        _logging.getLogger(__name__).warning("[tts] silence-split failed: %s", exc)
-
-    # Fallback: even split by duration.
-    total_ms = len(audio)
-    step = total_ms // n
-    out = [audio[i * step : (i + 1) * step] for i in range(n - 1)]
-    out.append(audio[(n - 1) * step :])
-    return out
-
-
-def _synthesize_batch(
-    engine,
-    voice: str | None,
-    batch: list[dict],
-    work_dir: str,
-) -> dict[int, bytes | None]:
-    """Synthesise a group of segments in a single Chatterbox call.
-
-    Returns ``{seg_index: wav_bytes}``. On batch failure (or non-Chatterbox
-    engines, or no voice cloning) falls back to per-segment synthesis through
-    the existing ``_synthesize_raw`` retry ladder.
-    """
-    indices = [m["index"] for m in batch]
-
-    def _per_segment_fallback() -> dict[int, bytes | None]:
-        out: dict[int, bytes | None] = {}
-        for m in batch:
-            wav_path = str(pathlib.Path(work_dir) / f"seg_{m['index']}.wav")
-            out[m["index"]] = _synthesize_raw(
-                engine, m["text"], wav_path, speaker_wav=voice,
-            )
-        return out
-
-    if not isinstance(engine, ChatterboxClient) or not voice or len(batch) == 1:
-        return _per_segment_fallback()
-
-    combined_text = " . ".join(m["text"].strip() for m in batch).strip()
-    try:
-        raw_bytes = engine._synthesize_with_voice(combined_text, voice)
-    except Exception as exc:
-        print(f"[tts] batch synth failed for {indices} ({exc}); falling back per-segment")
-        return _per_segment_fallback()
-
-    batch_wav = pathlib.Path(work_dir) / f"batch_{indices[0]}.wav"
-    batch_wav.write_bytes(raw_bytes)
-    audio = AudioSegment.from_wav(str(batch_wav))
-    chunks = _split_audio_into_n(audio, len(batch))
-
-    result: dict[int, bytes | None] = {}
-    for m, chunk in zip(batch, chunks):
-        buf = io.BytesIO()
-        chunk.export(buf, format="wav")
-        result[m["index"]] = buf.getvalue()
-    print(f"[tts] batch synth ok for {indices} ({len(combined_text)} chars → {len(chunks)} chunks)")
-    return result
 
 
 def _split_text_aggressive(text: str, max_len: int = 80) -> list[str]:
@@ -822,33 +701,18 @@ def text_file_to_speech(
     }
 
     with tempfile.TemporaryDirectory() as synth_dir:
-        if _BATCH_ENABLED:
-            # Batched path: synthesise consecutive same-voice segments in one
-            # Chatterbox call so they share a stable timbre, then split on
-            # silence. Each batch is independent → still parallelisable.
-            groups = _group_segments_for_batch(seg_metas, seg_voices)
-            print(f" (batched: {len(seg_metas)} segs → {len(groups)} groups)", end="")
+        def _do_synth(idx: int, text: str, voice: str | None) -> tuple[int, bytes | None]:
+            wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
+            return idx, _synthesize_raw(engine, text, wav_path, speaker_wav=voice)
 
-            def _do_batch(voice: str | None, batch: list[dict]) -> dict[int, bytes | None]:
-                return _synthesize_batch(engine, voice, batch, synth_dir)
-
-            with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
-                futures = [pool.submit(_do_batch, v, b) for v, b in groups]
-                for fut in as_completed(futures):
-                    raw_wav_map.update(fut.result())
-        else:
-            def _do_synth(idx: int, text: str, voice: str | None) -> tuple[int, bytes | None]:
-                wav_path = str(pathlib.Path(synth_dir) / f"seg_{idx}.wav")
-                return idx, _synthesize_raw(engine, text, wav_path, speaker_wav=voice)
-
-            with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
-                futures = {
-                    pool.submit(_do_synth, m["index"], m["text"], seg_voices[m["index"]]): m["index"]
-                    for m in seg_metas
-                }
-                for fut in as_completed(futures):
-                    idx, raw_bytes = fut.result()
-                    raw_wav_map[idx] = raw_bytes
+        with ThreadPoolExecutor(max_workers=_TTS_WORKERS) as pool:
+            futures = {
+                pool.submit(_do_synth, m["index"], m["text"], seg_voices[m["index"]]): m["index"]
+                for m in seg_metas
+            }
+            for fut in as_completed(futures):
+                idx, raw_bytes = fut.result()
+                raw_wav_map[idx] = raw_bytes
 
     print(f" ({len(segments)} segments synthesized)", end="")
 
