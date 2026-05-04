@@ -16,7 +16,7 @@ End-to-end run on *Strait of Hormuz disruption threatens to shake global
 economy* (CBS 60 Minutes), English → Spanish, three speakers each cloned to a
 distinct voice using diarization-extracted reference clips:
 
-**Watch:** https://www.youtube.com/watch?v=a1EMOFqWtY0
+**Watch:** https://youtu.be/xdWC5vKKAl0
 
 Pipeline configuration: `Aligned + chatterbox + pyannote`, Whisper STT
 (`faster-whisper-medium`), argostranslate `en → es`, Chatterbox multilingual
